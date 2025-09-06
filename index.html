@@ -4,11 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>DNS Checker Widget</title>
+<!-- Jotform Widget SDK (needed only when used as a real custom widget) -->
 <script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
 <style>
-  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+  html, body { margin:0; background:transparent; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:#111; }
   h2 { text-align:center; margin:10px 0; }
-  .wrap { padding: 12px; }
+  .wrap { padding:12px; }
   .status { padding:10px; font-weight:700; color:#fff; text-align:center; border-radius:6px; margin-bottom:12px; }
   .ok { background:#16a34a; } 
   .bad { background:#dc2626; }
@@ -83,51 +84,48 @@
   function addOK(id){ const el=$(id); el.classList.remove('cell-bad'); el.classList.add('cell-ok'); }
   function addBAD(id){ const el=$(id); el.classList.remove('cell-ok'); el.classList.add('cell-bad'); }
 
-  async function doh(name, type, provider='cf') {
-    const url = provider === 'google'
-      ? `https://dns.google/resolve?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`
-      : `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`;
-    const headers = provider === 'google' ? {} : { accept: 'application/dns-json' };
-    const r = await fetch(url, { headers });
-    if (!r.ok) throw new Error(`${provider} DoH ${type} failed: ${r.status}`);
-    const j = await r.json();
-    if (debug) console.log({provider, name, type, j});
-    return (j.Answer || []).map(a => a.data);
+  // Robust DNS-over-HTTPS with Cloudflare -> Google fallback, explicit cors & ct
+  async function doh(name, type) {
+    const urls = [
+      `https://cloudflare-dns.com/dns-query?ct=application/dns-json&name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`,
+      `https://dns.google/resolve?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`
+    ];
+    let lastErr;
+    for (const url of urls) {
+      try {
+        const headers = url.includes('cloudflare-dns.com')
+          ? { 'accept': 'application/dns-json' }
+          : {}; // Google is fine without accept header
+        const r = await fetch(url, { mode: 'cors', headers });
+        if (!r.ok) throw new Error(`HTTP ${r.status} from ${new URL(url).hostname}`);
+        const j = await r.json();
+        if (debug) console.log({ provider: new URL(url).hostname, name, type, j });
+        return (j.Answer || []).map(a => a.data);
+      } catch (e) {
+        lastErr = e;
+        if (debug) console.warn('DoH failed, trying next provider →', e.message || e);
+      }
+    }
+    throw lastErr || new Error('All DoH providers failed');
   }
 
   try {
     if (!domain || (!expectedA.length && !expectedC)) {
       setBanner(false, 'Missing parameters: domain and expectedA/expectedC');
-      document.getElementById('hint').textContent = 'Example: ?domain=example.com&expectedA=93.184.216.34&expectedC=pages.host.com&cnameHost=www';
+      $('hint').textContent = 'Example: ?domain=example.com&expectedA=93.184.216.34&expectedC=pages.host.com&cnameHost=www';
       return;
     }
 
     // A (root)
-    let liveA = [];
-    try {
-      liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-    } catch {
-      liveA = (await doh(domain, 'A', 'google')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-    }
+    let liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
     $('actA').textContent = liveA.join(', ') || '—';
 
     // CNAME (host) — if empty, try A on that host (flattened)
     const fqdn = (cnameHost === '@' ? domain : `${cnameHost}.${domain}`);
-
-    let liveC = [];
-    try {
-      liveC = (await doh(fqdn, 'CNAME')).map(canon);
-    } catch {
-      liveC = (await doh(fqdn, 'CNAME', 'google')).map(canon);
-    }
+    let liveC = (await doh(fqdn, 'CNAME')).map(canon);
     if (liveC.length === 0) {
-      // try A for that host (flattened CNAME or direct A)
-      let flattenedA = [];
-      try {
-        flattenedA = (await doh(fqdn, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-      } catch {
-        flattenedA = (await doh(fqdn, 'A', 'google')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-      }
+      // Try A on the host to detect CNAME flattening or direct A setup
+      let flattenedA = (await doh(fqdn, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
       $('actC').textContent = flattenedA.length ? `${flattenedA.join(', ')} (A)` : '—';
     } else {
       $('actC').textContent = liveC.join(', ') || '—';
@@ -145,7 +143,6 @@
 
     setBanner(ok, ok ? "Your DNS Records are correct" : "Your DNS Records are NOT correct");
 
-    // Helpful hints
     const hints = [];
     if (aMatch === false) hints.push(`A mismatch: expected ${expectedA.join(', ')} vs actual ${liveA.join(', ') || '—'}.`);
     if (cMatch === false) {
@@ -153,19 +150,28 @@
       hints.push(`CNAME mismatch on ${cnameHost === '@' ? 'root (@)' : cnameHost}: expected ${expectedC} vs actual ${actCtxt}.`);
       hints.push(`Note: some providers flatten CNAMEs to A records; if so, CNAME will appear empty and A will show instead.`);
     }
-    document.getElementById('hint').innerHTML = hints.join(' ');
+    $('hint').innerHTML = hints.join(' ');
 
-    // Send result back to Jotform widget system
+    // Expose value to Jotform (if used as a real custom widget)
     if (window.JFCustomWidget) {
       JFCustomWidget.setValue(JSON.stringify({ ok, aMatch, cMatch, observedA: liveA, observedC: liveC, cnameHostUsed: cnameHost, domain }));
+      // Optional: block submit if failing
+      let CAN_SUBMIT = ok;
+      JFCustomWidget.subscribe('submit', function(){
+        JFCustomWidget.sendSubmit(!!CAN_SUBMIT, CAN_SUBMIT ? undefined : { error: "DNS check failed" });
+      });
+      JFCustomWidget.requestFrameResize && JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight });
     }
   } catch (e) {
     setBanner(false, "Could not fetch DNS records");
-    document.getElementById('hint').textContent = e.message;
+    $('hint').textContent = (e && e.message) ? e.message : String(e);
     if (debug) console.error(e);
+    if (window.JFCustomWidget) {
+      JFCustomWidget.setValue(JSON.stringify({ ok:false, error:'doh_failed', message: String(e && e.message || e) }));
+      JFCustomWidget.subscribe('submit', function(){ JFCustomWidget.sendSubmit(false, { error: "DNS lookup failed" }); });
+    }
   }
 })();
 </script>
 </body>
 </html>
-
