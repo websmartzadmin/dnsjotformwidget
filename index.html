@@ -3,58 +3,20 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>DNS Checker Widget</title>
-<!-- Jotform Widget SDK (needed if this is used as a true custom widget) -->
-<script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
+<title>DNS Check → Redirect</title>
 <style>
-  html, body { margin:0; background:transparent; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial; color:#111; }
-  h2 { text-align:center; margin:10px 0; }
-  .wrap { padding:12px; }
-  .status { padding:10px; font-weight:700; color:#fff; text-align:center; border-radius:6px; margin-bottom:12px; }
-  .ok { background:#16a34a; } 
-  .bad { background:#dc2626; }
-  table{width:100%;border-collapse:collapse;border:1px solid #ddd}
-  th,td{border:1px solid #ddd;padding:8px;text-align:center}
-  thead th{background:#f6f6f6}
-  .cell-ok{color:#16a34a;font-weight:700}
-  .cell-bad{color:#dc2626;font-weight:700}
-  .hint{color:#555;font-size:12px;margin-top:8px}
+  html,body { margin:0; font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial }
+  .wrap { max-width:720px; margin:12vh auto; padding:16px; text-align:center }
+  .spinner { width:36px; height:36px; border:4px solid #eee; border-top-color:#555; border-radius:50%; margin:16px auto; animation:spin 1s linear infinite }
+  @keyframes spin { to { transform:rotate(360deg) } }
+  .small { color:#666; font-size:12px; margin-top:8px }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h2 id="title">DNS Check</h2>
-  <div id="banner" class="status">Checking…</div>
-  <table>
-    <thead>
-      <tr>
-        <th rowspan="2">DNS Record</th>
-        <th colspan="2">Expected</th>
-        <th colspan="2">Actual</th>
-      </tr>
-      <tr>
-        <th>Value</th><th>Data</th>
-        <th>Value</th><th>Data</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td>A</td>
-        <td>@</td>
-        <td id="expA">—</td>
-        <td>@</td>
-        <td id="actA">—</td>
-      </tr>
-      <tr>
-        <td>CNAME</td>
-        <td id="cnameVal">www</td>
-        <td id="expC">—</td>
-        <td id="actCVal">www</td>
-        <td id="actC">—</td>
-      </tr>
-    </tbody>
-  </table>
-  <div id="hint" class="hint"></div>
+  <h2>Checking your DNS…</h2>
+  <div class="spinner" aria-hidden="true"></div>
+  <div id="msg" class="small">Please wait, redirecting to the form.</div>
 </div>
 
 <script>
@@ -62,29 +24,32 @@
   const qs = new URLSearchParams(location.search);
   const debug = qs.get('debug') === '1';
 
-  const domain    = (qs.get('domain') || '').trim();
+  // REQUIRED input params:
+  // - jotform: full URL to your JotForm (URL-encoded if you like)
+  // - domain: domain to inspect (e.g., example.com)
+  // - expectedA: comma-separated IPv4 list (optional)
+  // - expectedC: expected CNAME target (optional)
+  // OPTIONAL:
+  // - cnameHost: host to check for CNAME (default 'www', use '@' for root)
+  // - delay: ms to wait before redirect (default 0)
+  // - passthrough: comma-separated list of param names to pass through to JotForm unchanged
+  let jotform = (qs.get('jotform') || '').trim();
+  const domain = (qs.get('domain') || '').trim();
   const expectedA = (qs.get('expectedA') || '').split(',').map(s => s.trim()).filter(Boolean);
   const expectedC = (qs.get('expectedC') || '').trim();
   const cnameHost = (qs.get('cnameHost') || 'www').trim() || 'www';
+  const delayMs = parseInt(qs.get('delay') || '0', 10) || 0;
+  const passthroughList = (qs.get('passthrough') || '').split(',').map(s => s.trim()).filter(Boolean);
 
   const $ = id => document.getElementById(id);
   const canon = s => String(s || '').trim().replace(/\.$/, '').toLowerCase();
 
-  $('title').textContent = domain || 'DNS Check';
-  $('expA').textContent = expectedA.join(', ') || '—';
-  $('expC').textContent = expectedC || '—';
-  $('cnameVal').textContent = cnameHost === '@' ? '@' : cnameHost;
-  $('actCVal').textContent  = cnameHost === '@' ? '@' : cnameHost;
+  function setMsg(t){ const el = $('msg'); if (el) el.textContent = t; }
 
-  function setBanner(ok, text) {
-    const b = $('banner');
-    b.className = 'status ' + (ok ? 'ok' : 'bad');
-    b.textContent = text;
-  }
-  function addOK(id){ const el=$(id); el.classList.remove('cell-bad'); el.classList.add('cell-ok'); }
-  function addBAD(id){ const el=$(id); el.classList.remove('cell-ok'); el.classList.add('cell-bad'); }
+  if (!jotform) { setMsg('Missing ?jotform=FORM_URL'); return; }
+  if (!domain || (!expectedA.length && !expectedC)) { setMsg('Missing DNS params: need domain and expectedA and/or expectedC'); return; }
 
-  // DNS-over-HTTPS with CF -> Google fallback
+  // Robust DNS-over-HTTPS (Cloudflare → Google)
   async function doh(name, type) {
     const urls = [
       `https://cloudflare-dns.com/dns-query?ct=application/dns-json&name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`,
@@ -97,88 +62,68 @@
         const r = await fetch(url, { mode:'cors', headers });
         if (!r.ok) throw new Error(`HTTP ${r.status} from ${new URL(url).hostname}`);
         const j = await r.json();
-        if (debug) console.log({ provider:new URL(url).hostname, name, type, j });
         return (j.Answer || []).map(a => a.data);
-      } catch (e) { lastErr = e; if (debug) console.warn('DoH failed →', e.message || e); }
+      } catch (e) { lastErr = e; }
     }
     throw lastErr || new Error('All DoH providers failed');
   }
 
-  // Guard to prevent false error banner after success
-  let comparisonDone = false;
-
-  if (!domain || (!expectedA.length && !expectedC)) {
-    setBanner(false, 'Missing parameters: domain and expectedA/expectedC');
-    $('hint').textContent = 'Example: ?domain=example.com&expectedA=93.184.216.34&expectedC=pages.host.com&cnameHost=www';
-    return;
-  }
-
+  // run the check
+  let ok = false, aMatch = null, cMatch = null, liveA = [], liveC = [];
   try {
-    // === Fetch DNS ===
-    const liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-    $('actA').textContent = liveA.join(', ') || '—';
-
+    // A at root
+    liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
+    // CNAME at host
     const fqdn = (cnameHost === '@' ? domain : `${cnameHost}.${domain}`);
-    let liveC = (await doh(fqdn, 'CNAME')).map(canon);
-    if (liveC.length === 0) {
-      const flattenedA = (await doh(fqdn, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-      $('actC').textContent = flattenedA.length ? `${flattenedA.join(', ')} (A)` : '—';
-    } else {
-      $('actC').textContent = liveC.join(', ') || '—';
-    }
+    liveC = (await doh(fqdn, 'CNAME')).map(canon);
 
-    // === Compare ===
-    const aMatch = expectedA.length ? expectedA.every(ip => liveA.includes(ip)) : null;
-    const cMatch = expectedC ? liveC.includes(canon(expectedC)) : null;
-
-    if (aMatch !== null) { aMatch ? (addOK('expA'), addOK('actA')) : addBAD('actA'); }
-    if (cMatch !== null) { cMatch ? (addOK('expC'), addOK('actC')) : addBAD('actC'); }
+    aMatch = expectedA.length ? expectedA.every(ip => liveA.includes(ip)) : null;
+    cMatch = expectedC ? liveC.includes(canon(expectedC)) : null;
 
     const checks = [aMatch, cMatch].filter(v => v !== null);
-    const ok = checks.length ? checks.every(Boolean) : false;
+    ok = checks.length ? checks.every(Boolean) : false;
 
-    setBanner(ok, ok ? "Your DNS Records are correct" : "Your DNS Records are NOT correct");
-
-    const hints = [];
-    if (aMatch === false) hints.push(`A mismatch: expected ${expectedA.join(', ')} vs actual ${liveA.join(', ') || '—'}.`);
-    if (cMatch === false) {
-      const actCtxt = $('actC').textContent || '—';
-      hints.push(`CNAME mismatch on ${cnameHost === '@' ? 'root (@)' : cnameHost}: expected ${expectedC} vs actual ${actCtxt}.`);
-      hints.push(`Note: some providers flatten CNAME to A; then CNAME appears empty and A shows instead.`);
-    }
-    $('hint').innerHTML = hints.join(' ');
-
-    comparisonDone = true;
-
-    // === Jotform widget integration (safe) ===
-    if (window.JFCustomWidget) {
-      try {
-        JFCustomWidget.setValue(JSON.stringify({ ok, aMatch, cMatch, observedA: liveA, observedC: liveC, cnameHostUsed: cnameHost, domain }));
-        JFCustomWidget.subscribe('submit', function(){
-          JFCustomWidget.sendSubmit(!!ok, ok ? undefined : { error: "DNS check failed" });
-        });
-        if (JFCustomWidget.requestFrameResize) {
-          JFCustomWidget.requestFrameResize({ height: document.body.scrollHeight });
-        }
-      } catch (e) {
-        if (debug) console.warn('Widget plumbing error (ignored):', e);
-      }
-    }
-
+    if (debug) console.log({domain, expectedA, expectedC, cnameHost, liveA, liveC, aMatch, cMatch, ok});
   } catch (e) {
-    if (!comparisonDone) {
-      setBanner(false, "Could not fetch DNS records");
-      $('hint').textContent = (e && e.message) ? e.message : String(e);
-    }
-    if (debug) console.error(e);
-    if (window.JFCustomWidget) {
-      try {
-        JFCustomWidget.setValue(JSON.stringify({ ok:false, error:'doh_failed', message: String(e && e.message || e) }));
-        JFCustomWidget.subscribe('submit', function(){ JFCustomWidget.sendSubmit(false, { error: "DNS lookup failed" }); });
-      } catch(_) {}
-    }
+    // If DNS fails entirely, mark as not valid; still redirect and let the form show guidance.
+    ok = false;
+    if (debug) console.error('DoH error:', e);
   }
+
+  // Build the JotForm URL with dnsvalid=yes|no (and optional pass-throughs)
+  try {
+    jotform = decodeURIComponent(jotform); // in case caller URL-encoded it
+  } catch(_) {}
+
+  let target;
+  try {
+    target = new URL(jotform);
+  } catch {
+    setMsg('Invalid JotForm URL'); return;
+  }
+
+  // Mandatory param
+  target.searchParams.set('dnsvalid', ok ? 'yes' : 'no');
+
+  // Useful: include what we saw / expected (optional; add hidden fields in JotForm if you want to capture)
+  if (expectedA.length) target.searchParams.set('expectedA', expectedA.join(','));
+  if (expectedC)        target.searchParams.set('expectedC', expectedC);
+  target.searchParams.set('observedA', liveA.join(', '));
+  target.searchParams.set('observedC', liveC.join(', '));
+  target.searchParams.set('domain', domain);
+  target.searchParams.set('cnameHost', cnameHost);
+
+  // Pass through any extra params the caller asked to keep
+  for (const key of passthroughList) {
+    if (qs.has(key)) target.searchParams.set(key, qs.get(key));
+  }
+
+  setMsg(ok ? 'DNS valid — redirecting…' : 'DNS not valid — redirecting…');
+
+  const go = () => location.replace(target.toString());
+  delayMs > 0 ? setTimeout(go, delayMs) : go();
 })();
 </script>
 </body>
 </html>
+
