@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>DNS Check Widget</title>
+<script src="https://js.jotform.com/JotFormCustomWidget.min.js"></script>
+<style>
+  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+  .wrap { padding: 12px; }
+  .status { padding:10px; font-weight:700; color:#fff; text-align:center; border-radius:6px; margin-bottom:12px; }
+  .ok { background:#16a34a; } .bad { background:#dc2626; }
+  table{width:100%;border-collapse:collapse;border:1px solid #ddd}
+  th,td{border:1px solid #ddd;padding:8px;text-align:center}
+  thead th{background:#f6f6f6}
+  .cell-ok{color:#16a34a;font-weight:700}
+  .cell-bad{color:#dc2626;font-weight:700}
+  .hint{color:#555;font-size:12px;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="banner" class="status">Checking…</div>
+  <table>
+    <thead>
+      <tr>
+        <th rowspan="2">DNS Record</th>
+        <th colspan="2">Expected</th>
+        <th colspan="2">Actual</th>
+      </tr>
+      <tr>
+        <th>Value</th><th>Data</th>
+        <th>Value</th><th>Data</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>A</td>
+        <td>@</td>
+        <td id="expA">—</td>
+        <td>@</td>
+        <td id="actA">—</td>
+      </tr>
+      <tr>
+        <td>CNAME</td>
+        <td id="cnameVal">www</td>
+        <td id="expC">—</td>
+        <td id="actCVal">www</td>
+        <td id="actC">—</td>
+      </tr>
+    </tbody>
+  </table>
+  <div id="hint" class="hint"></div>
+</div>
+
+<script>
+(function(){
+  let CHECK_OK = false; // used to allow/block submit
+
+  const qs = new URLSearchParams(location.search);
+  const domain    = (qs.get('domain') || '').trim();
+  const expectedA = (qs.get('expectedA') || '').split(',').map(s => s.trim()).filter(Boolean);
+  const expectedC = (qs.get('expectedC') || '').trim();
+  const cnameHost = (qs.get('cnameHost') || 'www').trim() || 'www';
+
+  const $ = id => document.getElementById(id);
+  $('expA').textContent = expectedA.join(', ') || '—';
+  $('expC').textContent = expectedC || '—';
+  $('cnameVal').textContent = cnameHost === '@' ? '@' : cnameHost;
+  $('actCVal').textContent  = cnameHost === '@' ? '@' : cnameHost;
+
+  function setBanner(ok, text){
+    const b = $('banner');
+    b.className = 'status ' + (ok ? 'ok' : 'bad');
+    b.textContent = text;
+    requestResize();
+  }
+  function addOK(id){ $(id).classList.remove('cell-bad'); $(id).classList.add('cell-ok'); }
+  function addBAD(id){ $(id).classList.remove('cell-ok'); $(id).classList.add('cell-bad'); }
+
+  async function doh(name, type){
+    const url = `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=${type}`;
+    const r = await fetch(url, { headers: { accept: 'application/dns-json' } });
+    if(!r.ok) throw new Error(`DNS ${type} lookup failed (${r.status})`);
+    const j = await r.json();
+    return (j.Answer || []).map(a => a.data);
+  }
+  const canon = s => String(s || '').trim().replace(/\.$/,'').toLowerCase();
+
+  async function run(){
+    if (!domain || (!expectedA.length && !expectedC)) {
+      CHECK_OK = false;
+      setBanner(false, 'Missing widget parameters: domain and expectedA/expectedC');
+      JFCustomWidget.setValue(JSON.stringify({ ok: false, error: 'missing_params' }));
+      return;
+    }
+    try {
+      // A @
+      const aAns = await doh(domain, 'A');
+      const liveA = aAns.filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
+      $('actA').textContent = liveA.join(', ') || '—';
+
+      // CNAME
+      const fqdn = (cnameHost === '@' ? domain : `${cnameHost}.${domain}`);
+      const cAns = await doh(fqdn, 'CNAME');
+      const liveC = cAns.map(canon);
+      $('actC').textContent = liveC.join(', ') || '—';
+
+      // Compare
+      const aMatch = expectedA.length ? expectedA.every(ip => liveA.includes(ip)) : null;
+      const cMatch = expectedC ? liveC.includes(canon(expectedC)) : null;
+
+      if (aMatch !== null) { (aMatch ? addOK('expA') : 0); (aMatch ? addOK('actA') : addBAD('actA')); }
+      if (cMatch !== null) { (cMatch ? addOK('expC') : 0); (cMatch ? addOK('actC') : addBAD('actC')); }
+
+      const checks = [aMatch, cMatch].filter(v => v !== null);
+      CHECK_OK = checks.length ? checks.every(Boolean) : false;
+
+      setBanner(CHECK_OK,
+        CHECK_OK ? "Your DNS Records are correct" : "Your DNS Records are NOT correct"
+      );
+
+      // expose value back to Jotform (so you can see it in submissions/conditions)
+      JFCustomWidget.setValue(JSON.stringify({
+        ok: CHECK_OK,
+        aMatch: aMatch === null ? 'skipped' : aMatch,
+        cMatch: cMatch === null ? 'skipped' : cMatch,
+        observedA: liveA,
+        observedC: liveC,
+        cnameHostUsed: cnameHost,
+        domain
+      }));
+    } catch(e){
+      CHECK_OK = false;
+      setBanner(false, 'Could not fetch DNS records');
+      $('hint').textContent = e.message;
+      JFCustomWidget.setValue(JSON.stringify({ ok:false, error:'lookup_failed', message:String(e) }));
+    }
+  }
+
+  // === Jotform Widget SDK wiring ===
+  function requestResize(){
+    const h = document.body.scrollHeight;
+    if (window.JFCustomWidget && JFCustomWidget.requestFrameResize) {
+      JFCustomWidget.requestFrameResize({ height: h });
+    }
+  }
+
+  // Wait for widget to be ready, then run check
+  JFCustomWidget.subscribe('ready', function(){
+    run().then(requestResize);
+  });
+
+  // Block submit if CHECK_OK is false
+  JFCustomWidget.subscribe('submit', function(){
+    if (CHECK_OK) {
+      JFCustomWidget.sendSubmit(true);
+    } else {
+      JFCustomWidget.sendSubmit(false, { error: "DNS check failed" });
+    }
+  });
+})();
+</script>
+</body>
+</html>
