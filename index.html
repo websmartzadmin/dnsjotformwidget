@@ -22,34 +22,26 @@
 <script>
 (async () => {
   const qs = new URLSearchParams(location.search);
-  const debug = qs.get('debug') === '1';
 
-  // REQUIRED input params:
-  // - jotform: full URL to your JotForm (URL-encoded if you like)
-  // - domain: domain to inspect (e.g., example.com)
-  // - expectedA: comma-separated IPv4 list (optional)
-  // - expectedC: expected CNAME target (optional)
-  // OPTIONAL:
-  // - cnameHost: host to check for CNAME (default 'www', use '@' for root)
-  // - delay: ms to wait before redirect (default 0)
-  // - passthrough: comma-separated list of param names to pass through to JotForm unchanged
+  // Inputs you will supply:
+  // - jotform: FULL Jotform URL (may already include its own params)
+  // - domain
+  // - expectedA (comma-separated IPv4s)
+  // - expectedC (hostname)
+  // - cnameHost (default 'www', use '@' for root)
   let jotform = (qs.get('jotform') || '').trim();
   const domain = (qs.get('domain') || '').trim();
   const expectedA = (qs.get('expectedA') || '').split(',').map(s => s.trim()).filter(Boolean);
   const expectedC = (qs.get('expectedC') || '').trim();
   const cnameHost = (qs.get('cnameHost') || 'www').trim() || 'www';
-  const delayMs = parseInt(qs.get('delay') || '0', 10) || 0;
-  const passthroughList = (qs.get('passthrough') || '').split(',').map(s => s.trim()).filter(Boolean);
 
-  const $ = id => document.getElementById(id);
-  const canon = s => String(s || '').trim().replace(/\.$/, '').toLowerCase();
-
-  function setMsg(t){ const el = $('msg'); if (el) el.textContent = t; }
+  const setMsg = t => { const el=document.getElementById('msg'); if (el) el.textContent = t; };
+  const canon = s => String(s || '').trim().replace(/\.$/,'').toLowerCase();
 
   if (!jotform) { setMsg('Missing ?jotform=FORM_URL'); return; }
   if (!domain || (!expectedA.length && !expectedC)) { setMsg('Missing DNS params: need domain and expectedA and/or expectedC'); return; }
 
-  // Robust DNS-over-HTTPS (Cloudflare → Google)
+  // DNS-over-HTTPS (Cloudflare → Google fallback)
   async function doh(name, type) {
     const urls = [
       `https://cloudflare-dns.com/dns-query?ct=application/dns-json&name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`,
@@ -68,62 +60,39 @@
     throw lastErr || new Error('All DoH providers failed');
   }
 
-  // run the check
-  let ok = false, aMatch = null, cMatch = null, liveA = [], liveC = [];
+  // Run the check
+  let ok = false;
   try {
-    // A at root
-    liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
-    // CNAME at host
-    const fqdn = (cnameHost === '@' ? domain : `${cnameHost}.${domain}`);
-    liveC = (await doh(fqdn, 'CNAME')).map(canon);
+    const liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
 
-    aMatch = expectedA.length ? expectedA.every(ip => liveA.includes(ip)) : null;
-    cMatch = expectedC ? liveC.includes(canon(expectedC)) : null;
+    const fqdn = (cnameHost === '@' ? domain : `${cnameHost}.${domain}`);
+    const liveC = (await doh(fqdn, 'CNAME')).map(canon);
+
+    const aMatch = expectedA.length ? expectedA.every(ip => liveA.includes(ip)) : null;
+    const cMatch = expectedC ? liveC.includes(canon(expectedC)) : null;
 
     const checks = [aMatch, cMatch].filter(v => v !== null);
     ok = checks.length ? checks.every(Boolean) : false;
-
-    if (debug) console.log({domain, expectedA, expectedC, cnameHost, liveA, liveC, aMatch, cMatch, ok});
   } catch (e) {
-    // If DNS fails entirely, mark as not valid; still redirect and let the form show guidance.
+    // If DNS lookup fails, mark as not valid and continue to the form
     ok = false;
-    if (debug) console.error('DoH error:', e);
   }
 
-  // Build the JotForm URL with dnsvalid=yes|no (and optional pass-throughs)
-  try {
-    jotform = decodeURIComponent(jotform); // in case caller URL-encoded it
-  } catch(_) {}
-
+  // Redirect to your Jotform URL with ONLY dnsvalid appended
+  try { jotform = decodeURIComponent(jotform); } catch(_) {}
   let target;
   try {
     target = new URL(jotform);
   } catch {
-    setMsg('Invalid JotForm URL'); return;
+    setMsg('Invalid JotForm URL');
+    return;
   }
 
-  // Mandatory param
   target.searchParams.set('dnsvalid', ok ? 'yes' : 'no');
 
-  // Useful: include what we saw / expected (optional; add hidden fields in JotForm if you want to capture)
-  if (expectedA.length) target.searchParams.set('expectedA', expectedA.join(','));
-  if (expectedC)        target.searchParams.set('expectedC', expectedC);
-  target.searchParams.set('observedA', liveA.join(', '));
-  target.searchParams.set('observedC', liveC.join(', '));
-  target.searchParams.set('domain', domain);
-  target.searchParams.set('cnameHost', cnameHost);
-
-  // Pass through any extra params the caller asked to keep
-  for (const key of passthroughList) {
-    if (qs.has(key)) target.searchParams.set(key, qs.get(key));
-  }
-
   setMsg(ok ? 'DNS valid — redirecting…' : 'DNS not valid — redirecting…');
-
-  const go = () => location.replace(target.toString());
-  delayMs > 0 ? setTimeout(go, delayMs) : go();
+  location.replace(target.toString());
 })();
 </script>
 </body>
 </html>
-
