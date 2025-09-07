@@ -22,9 +22,7 @@
   const setMsg = t => { const el=document.getElementById('msg'); if (el) el.textContent=t; };
   const canon = s => String(s||'').trim().replace(/\.$/,'').toLowerCase();
 
-  // Required inputs:
-  //  - jotform: FULL JotForm URL encoded once (encodeURIComponent)
-  //  - domain, expectedA (csv), expectedC, cnameHost (default 'www')
+  // Required inputs
   const jotformEnc = (qs.get('jotform') || '').trim();
   const domain = (qs.get('domain') || '').trim();
   const expectedA = (qs.get('expectedA') || '').split(',').map(s=>s.trim()).filter(Boolean);
@@ -34,7 +32,7 @@
   if (!jotformEnc) { setMsg('Missing ?jotform='); return; }
   if (!domain || (!expectedA.length && !expectedC)) { setMsg('Missing DNS params'); return; }
 
-  // DNS-over-HTTPS (Cloudflare → Google fallback)
+  // DNS-over-HTTPS
   async function doh(name, type) {
     const urls = [
       `https://cloudflare-dns.com/dns-query?ct=application/dns-json&name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`,
@@ -53,7 +51,7 @@
     throw lastErr || new Error('All DoH providers failed');
   }
 
-  // Compute dnsvalid
+  // DNS check
   let dnsOK = false;
   try {
     const liveA = (await doh(domain, 'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
@@ -63,20 +61,19 @@
     const aMatch = expectedA.length ? expectedA.every(ip => liveA.includes(ip)) : null;
     let cMatch = expectedC ? liveC.includes(canon(expectedC)) : null;
 
-    // tolerate flattened CNAME (no CNAME, but A(host) == A(expectedC))
     if (expectedC && cMatch === false && liveC.length === 0) {
       const hostA = (await doh(fqdn,'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
       const expectedCA = (await doh(expectedC,'A')).filter(v => /^\d+\.\d+\.\d+\.\d+$/.test(v));
       if (hostA.length && expectedCA.length && expectedCA.every(ip => hostA.includes(ip))) cMatch = true;
     }
 
-    const checks = [aMatch, cMatch].filter(v => v !== null);
+    const checks = [aMatch, cMatch].filter(v=>v!==null);
     dnsOK = checks.length ? checks.every(Boolean) : false;
   } catch (e) {
     dnsOK = false;
   }
 
-  // Decode JotForm URL (was encoded once)
+  // Decode jotform (was encoded once)
   let jotform;
   try { jotform = decodeURIComponent(jotformEnc); } catch { jotform = jotformEnc; }
   let target;
@@ -85,14 +82,14 @@
   // Append dnsvalid
   target.searchParams.set('dnsvalid', dnsOK ? 'yes' : 'no');
 
-  // Build dnscheckurl from authoritative params and inject it (encoded once)
+  // Build dnscheckurl from params and pass RAW (not encoded) to JotForm
   (function injectChecker(){
-    const rowid = target.searchParams.get('rowid') || target.searchParams.get('cb') || String(Date.now()); // cache-buster
+    const rowid = target.searchParams.get('rowid') || target.searchParams.get('cb') || String(Date.now());
     let checker = `https://websmartzadmin.github.io/dnschecker?domain=${encodeURIComponent(domain)}`;
     if (expectedA.length) checker += `&expectedA=${encodeURIComponent(expectedA.join(','))}`;
     if (expectedC)        checker += `&expectedC=${encodeURIComponent(expectedC)}`;
     checker += `&cnameHost=${encodeURIComponent(cnameHost)}&cb=${encodeURIComponent(rowid)}`;
-    target.searchParams.set('dnscheckurl', encodeURIComponent(checker));
+    target.searchParams.set('dnscheckurl', checker);
   })();
 
   setMsg(dnsOK ? 'DNS valid — redirecting…' : 'DNS not valid — redirecting…');
@@ -101,3 +98,4 @@
 </script>
 </body>
 </html>
+
