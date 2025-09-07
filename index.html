@@ -43,7 +43,7 @@
     for (const url of urls) {
       try {
         const headers = url.includes('cloudflare-dns.com') ? { accept:'application/dns-json' } : {};
-        const r = await fetch(url, { mode:'cors', headers, cache:'no-store' });
+        const r = await fetch(url, { mode:'cors', headers, cache:'no-store', referrerPolicy:'no-referrer', credentials:'omit' });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         return (j.Answer || []).map(a => a.data);
@@ -97,10 +97,10 @@
     checkerUrl.searchParams.set('cb', cb);
   }
 
-  // Hand BOTH versions back to JotForm:
-  // 1) Encoded (safe for URL bar) – the browser will encode this in the final URL
+  // Hand BOTH versions back:
+  // 1) Encoded (browser will show %3A/%26 in URL bar)
   target.searchParams.set('dnscheckurl', checkerUrl.toString());
-  // 2) Raw (plain) – your widget should prefer this if present (especially on iOS)
+  // 2) Raw (plain) – your widget should prefer this if available
   target.searchParams.set('dnscheckurl_raw', checkerUrl.toString());
 
   setMsg(dnsOK ? 'DNS valid — redirecting…' : 'DNS not valid — redirecting…');
@@ -109,6 +109,7 @@
 </script>
 </body>
 </html>
+
 
 
 
